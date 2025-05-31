@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/time/rate"
 	"log"
@@ -9,29 +10,6 @@ import (
 	"strings"
 	"time"
 )
-
-func loggingMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		next.ServeHTTP(w, r)
-		log.Printf("%s %s %v", r.Method, r.RequestURI, time.Since(start))
-	})
-}
-
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
-}
 
 // Middleware to validate JWT tokens
 func (app *App) authenticateJWT(next http.HandlerFunc) http.HandlerFunc {
