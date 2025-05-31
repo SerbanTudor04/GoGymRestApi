@@ -893,3 +893,295 @@ func (app *App) doClientCheckInGymByPath(w http.ResponseWriter, r *http.Request)
 		"action":    "in",
 	})
 }
+
+// Add this struct to your existing code (reuse the same request struct as check-in)
+type ClientCheckOutRequest struct {
+	ClientID int `json:"client_id"`
+	GymID    int `json:"gym_id"`
+}
+
+// ClientPass struct is already defined in the check-in implementation
+// GymStats struct is already defined in the check-in implementation
+
+func (app *App) doClientCheckOutGym(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	var req ClientCheckOutRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if req.ClientID <= 0 {
+		sendErrorResponse(w, "Valid client_id is required", http.StatusBadRequest)
+		return
+	}
+	if req.GymID <= 0 {
+		sendErrorResponse(w, "Valid gym_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Start a transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Ensure we rollback if something goes wrong
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Call the PostgreSQL function
+	var result string
+	query := "SELECT do_client_check_out_gym($1, $2, $3)"
+	err = tx.QueryRow(query, req.ClientID, req.GymID, claims.UserID).Scan(&result)
+	if err != nil {
+		sendErrorResponse(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Check if operation was successful
+	if result != "OK" {
+		tx.Rollback()
+		sendErrorResponse(w, result, http.StatusBadRequest)
+		return
+	}
+
+	// Commit the transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Get the created client pass details and updated gym stats (optional)
+	var clientPass ClientPass
+	clientPassQuery := `SELECT id, gym_id, client_id, action, created_by,
+                        TO_CHAR(created_on, 'YYYY-MM-DD HH24:MI:SS') as created_on
+                        FROM client_passes 
+                        WHERE client_id = $1 AND gym_id = $2 AND action = 'out'
+                        ORDER BY id DESC 
+                        LIMIT 1`
+
+	err = app.DB.QueryRow(clientPassQuery, req.ClientID, req.GymID).Scan(
+		&clientPass.ID, &clientPass.GymID, &clientPass.ClientID,
+		&clientPass.Action, &clientPass.CreatedBy, &clientPass.CreatedOn)
+
+	if err != nil {
+		// Check-out was successful but couldn't fetch pass details
+		sendSuccessResponse(w, "Client checked out successfully", map[string]interface{}{
+			"status":    "OK",
+			"client_id": req.ClientID,
+			"gym_id":    req.GymID,
+			"action":    "out",
+		})
+		return
+	}
+
+	// Also get updated gym stats
+	var gymStats GymStats
+	gymStatsQuery := `SELECT id, gym_id, current_people, current_combined, max_people, max_reservations
+                      FROM gym_stats 
+                      WHERE gym_id = $1`
+
+	err = app.DB.QueryRow(gymStatsQuery, req.GymID).Scan(
+		&gymStats.ID, &gymStats.GymID, &gymStats.CurrentPeople,
+		&gymStats.CurrentCombined, &gymStats.MaxPeople, &gymStats.MaxReservations)
+
+	responseData := map[string]interface{}{
+		"client_pass": clientPass,
+	}
+
+	if err == nil {
+		responseData["gym_stats"] = gymStats
+	}
+
+	sendSuccessResponse(w, "Client checked out successfully", responseData)
+}
+
+// Alternative implementation using path parameters instead of JSON body
+func (app *App) doClientCheckOutGymByPath(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+
+	clientIDStr := vars["client_id"]
+	gymIDStr := vars["gym_id"]
+
+	clientID, err := strconv.Atoi(clientIDStr)
+	if err != nil || clientID <= 0 {
+		sendErrorResponse(w, "Invalid client_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	gymID, err := strconv.Atoi(gymIDStr)
+	if err != nil || gymID <= 0 {
+		sendErrorResponse(w, "Invalid gym_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Start a transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Ensure we rollback if something goes wrong
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Call the PostgreSQL function
+	var result string
+	query := "SELECT do_client_check_out_gym($1, $2, $3)"
+	err = tx.QueryRow(query, clientID, gymID, claims.UserID).Scan(&result)
+	if err != nil {
+		sendErrorResponse(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Check if operation was successful
+	if result != "OK" {
+		tx.Rollback()
+		sendErrorResponse(w, result, http.StatusBadRequest)
+		return
+	}
+
+	// Commit the transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	sendSuccessResponse(w, "Client checked out successfully", map[string]interface{}{
+		"status":    "OK",
+		"client_id": clientID,
+		"gym_id":    gymID,
+		"action":    "out",
+	})
+}
+
+// Additional helper function to get client's current gym status
+func (app *App) getClientGymStatus(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+	clientIDStr := vars["client_id"]
+	gymIDStr := vars["gym_id"]
+
+	clientID, err := strconv.Atoi(clientIDStr)
+	if err != nil || clientID <= 0 {
+		sendErrorResponse(w, "Invalid client_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	gymID, err := strconv.Atoi(gymIDStr)
+	if err != nil || gymID <= 0 {
+		sendErrorResponse(w, "Invalid gym_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Check if client is currently checked in today
+	var lastPass ClientPass
+	lastPassQuery := `SELECT id, gym_id, client_id, action, created_by,
+                      TO_CHAR(created_on, 'YYYY-MM-DD HH24:MI:SS') as created_on
+                      FROM client_passes 
+                      WHERE client_id = $1 AND gym_id = $2 
+                        AND DATE(created_on) = CURRENT_DATE
+                      ORDER BY id DESC 
+                      LIMIT 1`
+
+	err = app.DB.QueryRow(lastPassQuery, clientID, gymID).Scan(
+		&lastPass.ID, &lastPass.GymID, &lastPass.ClientID,
+		&lastPass.Action, &lastPass.CreatedBy, &lastPass.CreatedOn)
+
+	if err != nil {
+		// No passes found for today
+		sendSuccessResponse(w, "Client gym status retrieved", map[string]interface{}{
+			"client_id":     clientID,
+			"gym_id":        gymID,
+			"status":        "not_visited_today",
+			"last_action":   nil,
+			"can_check_in":  true,
+			"can_check_out": false,
+		})
+		return
+	}
+
+	// Determine current status based on last action
+	status := "checked_out"
+	canCheckIn := true
+	canCheckOut := false
+
+	if lastPass.Action == "in" {
+		status = "checked_in"
+		canCheckIn = false
+		canCheckOut = true
+	}
+
+	sendSuccessResponse(w, "Client gym status retrieved", map[string]interface{}{
+		"client_id":     clientID,
+		"gym_id":        gymID,
+		"status":        status,
+		"last_action":   lastPass,
+		"can_check_in":  canCheckIn,
+		"can_check_out": canCheckOut,
+	})
+}

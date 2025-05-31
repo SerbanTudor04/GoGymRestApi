@@ -73,5 +73,13 @@ func (app *App) setupClientsRouter(r *mux.Router) {
 	c.HandleFunc("/checkin", app.doClientCheckInGym).Methods("POST")
 	// For path parameter version
 	c.HandleFunc("/{client_id}/checkin/gym/{gym_id}", app.doClientCheckInGymByPath).Methods("POST")
+	// For JSON body version
+	c.HandleFunc("/checkout", app.doClientCheckOutGym).Methods("POST")
+
+	// For path parameter version
+	c.HandleFunc("/{client_id}/checkout/gym/{gym_id}", app.doClientCheckOutGymByPath).Methods("POST")
+
+	// For client status check
+	c.HandleFunc("/{client_id}/gym/{gym_id}/status", app.getClientGymStatus).Methods("GET")
 
 }
