@@ -455,3 +455,227 @@ func nullIfEmpty(s string) interface{} {
 	}
 	return s
 }
+
+// Add these structs to your existing code
+type AddClientMembershipRequest struct {
+	ClientID     int    `json:"client_id"`
+	MembershipID int    `json:"membership_id"`
+	ValidFrom    string `json:"valid_from"` // Expected format: "2024-01-15" (YYYY-MM-DD)
+}
+
+type ClientMembership struct {
+	ID           int    `json:"id"`
+	ClientID     int    `json:"client_id"`
+	MembershipID int    `json:"membership_id"`
+	StartingFrom string `json:"starting_from"`
+	EndingOn     string `json:"ending_on"`
+	Status       string `json:"status"`
+	CreatedBy    int    `json:"created_by"`
+	UpdatedBy    int    `json:"updated_by"`
+	CreatedOn    string `json:"created_on"`
+	UpdatedOn    string `json:"updated_on"`
+}
+
+func (app *App) addClientMembership(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	var req AddClientMembershipRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if req.ClientID <= 0 {
+		sendErrorResponse(w, "Valid client_id is required", http.StatusBadRequest)
+		return
+	}
+	if req.MembershipID <= 0 {
+		sendErrorResponse(w, "Valid membership_id is required", http.StatusBadRequest)
+		return
+	}
+	if req.ValidFrom == "" {
+		sendErrorResponse(w, "Valid valid_from date is required (format: YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+
+	// Validate date format (basic validation)
+	if len(req.ValidFrom) != 10 {
+		sendErrorResponse(w, "Invalid date format. Expected YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+
+	// Start a transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Ensure we rollback if something goes wrong
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Call the PostgreSQL function
+	var result string
+	query := "SELECT add_client_membership($1, $2, $3, $4)"
+	err = tx.QueryRow(query, req.ClientID, req.MembershipID, req.ValidFrom, claims.UserID).Scan(&result)
+	if err != nil {
+		sendErrorResponse(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Check if operation was successful
+	if result != "OK" {
+		tx.Rollback()
+		sendErrorResponse(w, result, http.StatusBadRequest)
+		return
+	}
+
+	// Commit the transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Get the created client membership details (optional)
+	var clientMembership ClientMembership
+	clientMembershipQuery := `SELECT id, client_id, membership_id, 
+                             TO_CHAR(starting_from, 'YYYY-MM-DD') as starting_from,
+                             TO_CHAR(ending_on, 'YYYY-MM-DD') as ending_on,
+                             status, created_by, updated_by,
+                             TO_CHAR(created_on, 'YYYY-MM-DD HH24:MI:SS') as created_on,
+                             TO_CHAR(updated_on, 'YYYY-MM-DD HH24:MI:SS') as updated_on
+                             FROM client_memberships 
+                             WHERE client_id = $1 AND membership_id = $2 
+                               AND starting_from = $3
+                             ORDER BY id DESC 
+                             LIMIT 1`
+
+	err = app.DB.QueryRow(clientMembershipQuery, req.ClientID, req.MembershipID, req.ValidFrom).Scan(
+		&clientMembership.ID, &clientMembership.ClientID, &clientMembership.MembershipID,
+		&clientMembership.StartingFrom, &clientMembership.EndingOn, &clientMembership.Status,
+		&clientMembership.CreatedBy, &clientMembership.UpdatedBy,
+		&clientMembership.CreatedOn, &clientMembership.UpdatedOn)
+
+	if err != nil {
+		// Client membership was created but couldn't fetch details
+		sendSuccessResponse(w, "Client membership added successfully", map[string]interface{}{
+			"status":        "OK",
+			"client_id":     req.ClientID,
+			"membership_id": req.MembershipID,
+			"valid_from":    req.ValidFrom,
+		})
+		return
+	}
+
+	sendSuccessResponse(w, "Client membership added successfully", clientMembership)
+}
+
+// Alternative implementation using path parameters instead of JSON body
+func (app *App) addClientMembershipByPath(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+
+	clientIDStr := vars["client_id"]
+	membershipIDStr := vars["membership_id"]
+	validFrom := vars["valid_from"] // Expected format: 2024-01-15
+
+	clientID, err := strconv.Atoi(clientIDStr)
+	if err != nil || clientID <= 0 {
+		sendErrorResponse(w, "Invalid client_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	membershipID, err := strconv.Atoi(membershipIDStr)
+	if err != nil || membershipID <= 0 {
+		sendErrorResponse(w, "Invalid membership_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	if validFrom == "" || len(validFrom) != 10 {
+		sendErrorResponse(w, "Invalid valid_from parameter. Expected format: YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+
+	// Start a transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Ensure we rollback if something goes wrong
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Call the PostgreSQL function
+	var result string
+	query := "SELECT add_client_membership($1, $2, $3, $4)"
+	err = tx.QueryRow(query, clientID, membershipID, validFrom, claims.UserID).Scan(&result)
+	if err != nil {
+		sendErrorResponse(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Check if operation was successful
+	if result != "OK" {
+		tx.Rollback()
+		sendErrorResponse(w, result, http.StatusBadRequest)
+		return
+	}
+
+	// Commit the transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	sendSuccessResponse(w, "Client membership added successfully", map[string]interface{}{
+		"status":        "OK",
+		"client_id":     clientID,
+		"membership_id": membershipID,
+		"valid_from":    validFrom,
+	})
+}

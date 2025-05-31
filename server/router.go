@@ -62,4 +62,9 @@ func (app *App) setupClientsRouter(r *mux.Router) {
 	c.HandleFunc("/add-user", app.addUserToClient).Methods("POST")
 	c.HandleFunc("/{client_id}/users/{user_id}", app.addUserToClientByPath).Methods("POST")
 	c.HandleFunc("/create", app.createClient).Methods("POST")
+	// For JSON body version
+	c.HandleFunc("/membership/add", app.addClientMembership).Methods("POST")
+
+	// For path parameter version
+	c.HandleFunc("/{client_id}/membership/{membership_id}/from/{valid_from}", app.addClientMembershipByPath).Methods("POST")
 }
