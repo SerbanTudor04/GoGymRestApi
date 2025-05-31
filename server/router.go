@@ -52,6 +52,8 @@ func (app *App) setupGymsRouter(r *mux.Router) {
 
 	// For path parameter version
 	g.HandleFunc("/{gym_id}/machine/{machine_id}", app.addMachineToGymByPath).Methods("POST")
+	// For gym stats retrieval
+	g.HandleFunc("/api/gym/{gym_id}/stats", app.getGymStats).Methods("GET")
 
 }
 
@@ -67,4 +69,9 @@ func (app *App) setupClientsRouter(r *mux.Router) {
 
 	// For path parameter version
 	c.HandleFunc("/{client_id}/membership/{membership_id}/from/{valid_from}", app.addClientMembershipByPath).Methods("POST")
+	// For JSON body version
+	c.HandleFunc("/checkin", app.doClientCheckInGym).Methods("POST")
+	// For path parameter version
+	c.HandleFunc("/{client_id}/checkin/gym/{gym_id}", app.doClientCheckInGymByPath).Methods("POST")
+
 }

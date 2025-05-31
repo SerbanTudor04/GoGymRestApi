@@ -701,3 +701,58 @@ func (app *App) addMachineToGymByPath(w http.ResponseWriter, r *http.Request) {
 		"gym_id":     gymID,
 	})
 }
+
+type GymStats struct {
+	ID              int `json:"id"`
+	GymID           int `json:"gym_id"`
+	CurrentPeople   int `json:"current_people"`
+	CurrentCombined int `json:"current_combined"`
+	MaxPeople       int `json:"max_people"`
+	MaxReservations int `json:"max_reservations"`
+}
+
+// Additional helper function to get current gym occupancy
+func (app *App) getGymStats(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+	gymIDStr := vars["gym_id"]
+
+	gymID, err := strconv.Atoi(gymIDStr)
+	if err != nil || gymID <= 0 {
+		sendErrorResponse(w, "Invalid gym_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	var gymStats GymStats
+	gymStatsQuery := `SELECT id, gym_id, current_people, current_combined, max_people, max_reservations
+                      FROM gym_stats 
+                      WHERE gym_id = $1`
+
+	err = app.DB.QueryRow(gymStatsQuery, gymID).Scan(
+		&gymStats.ID, &gymStats.GymID, &gymStats.CurrentPeople,
+		&gymStats.CurrentCombined, &gymStats.MaxPeople, &gymStats.MaxReservations)
+
+	if err != nil {
+		sendErrorResponse(w, "Gym not found or stats unavailable", http.StatusNotFound)
+		return
+	}
+
+	sendSuccessResponse(w, "Gym stats retrieved successfully", gymStats)
+}
