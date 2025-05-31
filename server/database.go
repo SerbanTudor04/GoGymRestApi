@@ -34,7 +34,7 @@ func loadConfig() *Config {
 	maxLifetime, _ := time.ParseDuration(maxLifetimeStr)
 
 	return &Config{
-		DBHost:       getEnv("DB_HOST", "localhost"),
+		DBHost:       getEnv("DB_HOST", "postgres"),
 		DBPort:       getEnv("DB_PORT", "5432"),
 		DBUser:       getEnv("DB_USER", "gogymrest"),
 		DBPassword:   getEnv("DB_PASSWORD", "gogymrest"),

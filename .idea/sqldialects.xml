@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="SqlDialectMappings">
+    <file url="file://$PROJECT_DIR$/init-scripts/02-create-tables.sql" dialect="PostgreSQL" />
+    <file url="file://$PROJECT_DIR$/init-scripts/03-create-nomenclators.sql" dialect="PostgreSQL" />
+    <file url="file://$PROJECT_DIR$/init-scripts/04-create-routines.sql" dialect="PostgreSQL" />
     <file url="file://$PROJECT_DIR$/server/users.go" dialect="GenericSQL" />
   </component>
 </project>

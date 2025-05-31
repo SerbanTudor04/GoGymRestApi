@@ -11,6 +11,7 @@ func (app *App) setupApiRouter(r *mux.Router) {
 	app.setupMembershipsRouter(api)
 	app.setupGymsRouter(api)
 	app.setupClientsRouter(api)
+	api.HandleFunc("/health", app.healthCheck).Methods("GET")
 }
 
 func (app *App) setupUserRouter(r *mux.Router) {

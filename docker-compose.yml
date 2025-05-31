@@ -1,27 +1,151 @@
+# docker-compose.yml - Complete setup with Traefik and SSL
+version: '3.8'
+
 services:
+  # Traefik reverse proxy
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      # API and dashboard
+      - --api.dashboard=true
+      - --api.insecure=false
+      # Entrypoints
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      # Docker provider
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=traefik
+      # Let's Encrypt
+      - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
+      - --certificatesresolvers.letsencrypt.acme.email=your-email@fintechpro.ro
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      # Global redirect to HTTPS
+      - --entrypoints.web.http.redirections.entryPoint.to=websecure
+      - --entrypoints.web.http.redirections.entryPoint.scheme=https
+      - --entrypoints.web.http.redirections.entrypoint.permanent=true
+      # Logging
+      - --log.level=INFO
+      - --accesslog=true
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"  # Traefik dashboard (secure it in production)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+    networks:
+      - traefik
+    labels:
+      # Dashboard
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.demogogymapi.fintechpro.ro`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik.service=api@internal"
+      # Dashboard auth (optional)
+      - "traefik.http.routers.traefik.middlewares=auth"
+      - "traefik.http.middlewares.auth.basicauth.users=admin:$$2y$$10$$2b2cu4Xx.KQJ3QF3n4O6RuQVLf9/1/P8nK1ZnBEJ3z9.UYw7H8q26"  # admin:password
+
+  # PostgreSQL Database
   postgres:
     image: postgres:15-alpine
+    container_name: postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: gogymrest
-      POSTGRES_PASSWORD: gogymrest
-      POSTGRES_DB: gogym
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init-scripts:/docker-entrypoint-initdb.d
     networks:
-      - gogym_network
+      - backend
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U apiuser -d apidb"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    # Uncomment to expose PostgreSQL port (for external access)
+    # ports:
+    #   - "5432:5432"
+
+  # Your Go REST API
+  gorestgym-api:
+    image: serbantudor/gorestgym:latest
+    container_name: gorestgym-api
+    restart: unless-stopped
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - DB_SSL_MODE=disable  # Internal Docker network
+      - SERVER_PORT=8080
+      - DB_MAX_OPEN_CONNS=25
+      - DB_MAX_IDLE_CONNS=10
+      - DB_MAX_LIFETIME=300s
+    networks:
+      - traefik
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      # Enable Traefik
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+
+      # HTTP router (will redirect to HTTPS)
+      - "traefik.http.routers.gorestgym-api.rule=Host(`demogogymapi.fintechpro.ro`)"
+      - "traefik.http.routers.gorestgym-api.entrypoints=web"
+
+      # HTTPS router
+      - "traefik.http.routers.gorestgym-api-secure.rule=Host(`demogogymapi.fintechpro.ro`)"
+      - "traefik.http.routers.gorestgym-api-secure.entrypoints=websecure"
+      - "traefik.http.routers.gorestgym-api-secure.tls.certresolver=letsencrypt"
+
+      # Service
+      - "traefik.http.services.gorestgym-api.loadbalancer.server.port=8080"
+
+      # Middlewares
+      - "traefik.http.routers.gorestgym-api-secure.middlewares=api-ratelimit,api-headers,api-cors"
+
+      # Rate limiting middleware
+      - "traefik.http.middlewares.api-ratelimit.ratelimit.burst=20"
+      - "traefik.http.middlewares.api-ratelimit.ratelimit.average=10"
+
+      # CORS middleware
+      - "traefik.http.middlewares.api-cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE"
+      - "traefik.http.middlewares.api-cors.headers.accesscontrolallowheaders=Content-Type,Authorization,X-Requested-With"
+      - "traefik.http.middlewares.api-cors.headers.accesscontrolalloworiginlist=https://demogogymapi.fintechpro.ro,http://localhost:3000"
+      - "traefik.http.middlewares.api-cors.headers.accesscontrolmaxage=100"
+      - "traefik.http.middlewares.api-cors.headers.addvaryheader=true"
+
+      # Security headers middleware
+      - "traefik.http.middlewares.api-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
+      - "traefik.http.middlewares.api-headers.headers.customresponseheaders.X-Content-Type-Options=nosniff"
+      - "traefik.http.middlewares.api-headers.headers.customresponseheaders.X-Frame-Options=DENY"
+      - "traefik.http.middlewares.api-headers.headers.customresponseheaders.X-XSS-Protection=1; mode=block"
+      - "traefik.http.middlewares.api-headers.headers.customresponseheaders.Strict-Transport-Security=max-age=31536000; includeSubDomains"
+      - "traefik.http.middlewares.api-headers.headers.customresponseheaders.Referrer-Policy=strict-origin-when-cross-origin"
+
+networks:
+  traefik:
+    external: true
+  backend:
+    internal: true
 
 volumes:
   postgres_data:
-
-networks:
-  gogym_network:
-    driver: bridge
+    driver: local
