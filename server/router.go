@@ -41,6 +41,17 @@ func (app *App) setupGymsRouter(r *mux.Router) {
 	g.HandleFunc("/", app.getGyms).Methods("GET")
 	g.HandleFunc("/add-user", app.addUserToGym).Methods("POST")
 	g.HandleFunc("/{gym_id}/users/{user_id}", app.addUserToGymByPath).Methods("POST")
+	// For JSON body version
+	g.HandleFunc("/membership/add", app.addMembershipToGym).Methods("POST")
+
+	// For path parameter version
+	g.HandleFunc("/{gym_id}/membership/{membership_id}", app.addMembershipToGymByPath).Methods("POST")
+
+	// For JSON body version
+	g.HandleFunc("/machine/add", app.addMachineToGym).Methods("POST")
+
+	// For path parameter version
+	g.HandleFunc("/{gym_id}/machine/{machine_id}", app.addMachineToGymByPath).Methods("POST")
 
 }
 
@@ -49,6 +60,6 @@ func (app *App) setupClientsRouter(r *mux.Router) {
 	c.Use(app.authenticateJWTMiddleware)
 	c.HandleFunc("/", app.getClients).Methods("GET")
 	c.HandleFunc("/add-user", app.addUserToClient).Methods("POST")
-	c.HandleFunc("/{gym_id}/users/{user_id}", app.addUserToClientByPath).Methods("POST")
+	c.HandleFunc("/{client_id}/users/{user_id}", app.addUserToClientByPath).Methods("POST")
 	c.HandleFunc("/create", app.createClient).Methods("POST")
 }

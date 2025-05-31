@@ -307,3 +307,397 @@ func (app *App) addUserToGymByPath(w http.ResponseWriter, r *http.Request) {
 		"gym_id":  gymID,
 	})
 }
+
+// Add these structs to your existing code
+type AddMembershipToGymRequest struct {
+	MembershipID int `json:"membership_id"`
+	GymID        int `json:"gym_id"`
+}
+
+type MembershipGym struct {
+	ID           int    `json:"id"`
+	MembershipID int    `json:"membership_id"`
+	GymID        int    `json:"gym_id"`
+	CreatedBy    int    `json:"created_by"`
+	UpdatedBy    int    `json:"updated_by"`
+	CreatedOn    string `json:"created_on"`
+	UpdatedOn    string `json:"updated_on"`
+}
+
+func (app *App) addMembershipToGym(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	var req AddMembershipToGymRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if req.MembershipID <= 0 {
+		sendErrorResponse(w, "Valid membership_id is required", http.StatusBadRequest)
+		return
+	}
+	if req.GymID <= 0 {
+		sendErrorResponse(w, "Valid gym_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Start a transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Ensure we rollback if something goes wrong
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Call the PostgreSQL function
+	var result string
+	query := "SELECT add_membership_to_gym($1, $2, $3)"
+	err = tx.QueryRow(query, req.MembershipID, req.GymID, claims.UserID).Scan(&result)
+	if err != nil {
+		sendErrorResponse(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Check if operation was successful
+	if result != "OK" {
+		tx.Rollback()
+		sendErrorResponse(w, result, http.StatusBadRequest)
+		return
+	}
+
+	// Commit the transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Get the created membership-gym relationship details (optional)
+	var membershipGym MembershipGym
+	membershipGymQuery := `SELECT id, membership_id, gym_id, created_by, updated_by,
+                          TO_CHAR(created_on, 'YYYY-MM-DD HH24:MI:SS') as created_on,
+                          TO_CHAR(updated_on, 'YYYY-MM-DD HH24:MI:SS') as updated_on
+                          FROM membership_gyms 
+                          WHERE membership_id = $1 AND gym_id = $2 
+                          ORDER BY id DESC 
+                          LIMIT 1`
+
+	err = app.DB.QueryRow(membershipGymQuery, req.MembershipID, req.GymID).Scan(
+		&membershipGym.ID, &membershipGym.MembershipID, &membershipGym.GymID,
+		&membershipGym.CreatedBy, &membershipGym.UpdatedBy,
+		&membershipGym.CreatedOn, &membershipGym.UpdatedOn)
+
+	if err != nil {
+		// Membership was added to gym but couldn't fetch details
+		sendSuccessResponse(w, "Membership added to gym successfully", map[string]interface{}{
+			"status":        "OK",
+			"membership_id": req.MembershipID,
+			"gym_id":        req.GymID,
+		})
+		return
+	}
+
+	sendSuccessResponse(w, "Membership added to gym successfully", membershipGym)
+}
+
+// Alternative implementation using path parameters instead of JSON body
+func (app *App) addMembershipToGymByPath(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+
+	membershipIDStr := vars["membership_id"]
+	gymIDStr := vars["gym_id"]
+
+	membershipID, err := strconv.Atoi(membershipIDStr)
+	if err != nil || membershipID <= 0 {
+		sendErrorResponse(w, "Invalid membership_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	gymID, err := strconv.Atoi(gymIDStr)
+	if err != nil || gymID <= 0 {
+		sendErrorResponse(w, "Invalid gym_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Start a transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Ensure we rollback if something goes wrong
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Call the PostgreSQL function
+	var result string
+	query := "SELECT add_membership_to_gym($1, $2, $3)"
+	err = tx.QueryRow(query, membershipID, gymID, claims.UserID).Scan(&result)
+	if err != nil {
+		sendErrorResponse(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Check if operation was successful
+	if result != "OK" {
+		tx.Rollback()
+		sendErrorResponse(w, result, http.StatusBadRequest)
+		return
+	}
+
+	// Commit the transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	sendSuccessResponse(w, "Membership added to gym successfully", map[string]interface{}{
+		"status":        "OK",
+		"membership_id": membershipID,
+		"gym_id":        gymID,
+	})
+}
+
+// Add these structs to your existing code
+type AddMachineToGymRequest struct {
+	MachineID int `json:"machine_id"`
+	GymID     int `json:"gym_id"`
+}
+
+type GymMachine struct {
+	ID        int    `json:"id"`
+	GymID     int    `json:"gym_id"`
+	MachineID int    `json:"machine_id"`
+	CreatedBy int    `json:"created_by"`
+	UpdatedBy int    `json:"updated_by"`
+	CreatedOn string `json:"created_on"`
+	UpdatedOn string `json:"updated_on"`
+}
+
+func (app *App) addMachineToGym(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	var req AddMachineToGymRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if req.MachineID <= 0 {
+		sendErrorResponse(w, "Valid machine_id is required", http.StatusBadRequest)
+		return
+	}
+	if req.GymID <= 0 {
+		sendErrorResponse(w, "Valid gym_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Start a transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Ensure we rollback if something goes wrong
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Call the PostgreSQL function
+	var result string
+	query := "SELECT add_machine_to_gym($1, $2, $3)"
+	err = tx.QueryRow(query, req.MachineID, req.GymID, claims.UserID).Scan(&result)
+	if err != nil {
+		sendErrorResponse(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Check if operation was successful
+	if result != "OK" {
+		tx.Rollback()
+		sendErrorResponse(w, result, http.StatusBadRequest)
+		return
+	}
+
+	// Commit the transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Get the created gym-machine relationship details (optional)
+	var gymMachine GymMachine
+	gymMachineQuery := `SELECT id, gym_id, machine_id, created_by, updated_by,
+                        TO_CHAR(created_on, 'YYYY-MM-DD HH24:MI:SS') as created_on,
+                        TO_CHAR(updated_on, 'YYYY-MM-DD HH24:MI:SS') as updated_on
+                        FROM gym_machines 
+                        WHERE gym_id = $1 AND machine_id = $2 
+                        ORDER BY id DESC 
+                        LIMIT 1`
+
+	err = app.DB.QueryRow(gymMachineQuery, req.GymID, req.MachineID).Scan(
+		&gymMachine.ID, &gymMachine.GymID, &gymMachine.MachineID,
+		&gymMachine.CreatedBy, &gymMachine.UpdatedBy,
+		&gymMachine.CreatedOn, &gymMachine.UpdatedOn)
+
+	if err != nil {
+		// Machine was added to gym but couldn't fetch details
+		sendSuccessResponse(w, "Machine added to gym successfully", map[string]interface{}{
+			"status":     "OK",
+			"machine_id": req.MachineID,
+			"gym_id":     req.GymID,
+		})
+		return
+	}
+
+	sendSuccessResponse(w, "Machine added to gym successfully", gymMachine)
+}
+
+// Alternative implementation using path parameters instead of JSON body
+func (app *App) addMachineToGymByPath(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	vars := mux.Vars(r)
+
+	machineIDStr := vars["machine_id"]
+	gymIDStr := vars["gym_id"]
+
+	machineID, err := strconv.Atoi(machineIDStr)
+	if err != nil || machineID <= 0 {
+		sendErrorResponse(w, "Invalid machine_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	gymID, err := strconv.Atoi(gymIDStr)
+	if err != nil || gymID <= 0 {
+		sendErrorResponse(w, "Invalid gym_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Start a transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Ensure we rollback if something goes wrong
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Call the PostgreSQL function
+	var result string
+	query := "SELECT add_machine_to_gym($1, $2, $3)"
+	err = tx.QueryRow(query, machineID, gymID, claims.UserID).Scan(&result)
+	if err != nil {
+		sendErrorResponse(w, "Database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Check if operation was successful
+	if result != "OK" {
+		tx.Rollback()
+		sendErrorResponse(w, result, http.StatusBadRequest)
+		return
+	}
+
+	// Commit the transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	sendSuccessResponse(w, "Machine added to gym successfully", map[string]interface{}{
+		"status":     "OK",
+		"machine_id": machineID,
+		"gym_id":     gymID,
+	})
+}
