@@ -103,13 +103,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Update Docker Hub description
-        uses: peter-evans/dockerhub-description@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
-          repository: ${{ env.DOCKER_IMAGE }}
-          readme-filepath: ./README.md
+#      - name: Update Docker Hub description
+#        uses: peter-evans/dockerhub-description@v3
+#        with:
+#          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+#          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+#          repository: ${{ env.DOCKER_IMAGE }}
+#          readme-filepath: ./README.md
 
   security:
     name: Security Scan
