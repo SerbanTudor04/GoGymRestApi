@@ -793,7 +793,7 @@ func (app *App) doClientCheckInGym(w http.ResponseWriter, r *http.Request) {
 
 	// Also get updated gym stats
 	var gymStats GymStats
-	gymStatsQuery := `SELECT id, gym_id, current_people, current_combined, max_people, max_reservations
+	gymStatsQuery := `SELECT id, gym_id, current_people, current_combined, max_people, max_resevations
                       FROM gym_stats 
                       WHERE gym_id = $1`
 
@@ -1001,7 +1001,7 @@ func (app *App) doClientCheckOutGym(w http.ResponseWriter, r *http.Request) {
 
 	// Also get updated gym stats
 	var gymStats GymStats
-	gymStatsQuery := `SELECT id, gym_id, current_people, current_combined, max_people, max_reservations
+	gymStatsQuery := `SELECT id, gym_id, current_people, current_combined, max_people, max_resevations
                       FROM gym_stats 
                       WHERE gym_id = $1`
 
@@ -1184,4 +1184,732 @@ func (app *App) getClientGymStatus(w http.ResponseWriter, r *http.Request) {
 		"can_check_in":  canCheckIn,
 		"can_check_out": canCheckOut,
 	})
+}
+
+// Update Client Request struct
+type UpdateClientRequest struct {
+	Name            string `json:"name,omitempty"`
+	CIF             string `json:"cif,omitempty"`
+	DOB             string `json:"dob,omitempty"` // Format: "2006-01-02"
+	TradeRegisterNo string `json:"trade_register_no,omitempty"`
+	CountryID       int    `json:"country_id,omitempty"`
+	StateID         int    `json:"state_id,omitempty"`
+	City            string `json:"city,omitempty"`
+	StreetName      string `json:"street_name,omitempty"`
+	StreetNo        string `json:"street_no,omitempty"`
+	Building        string `json:"building,omitempty"`
+	Floor           string `json:"floor,omitempty"`
+	Apartment       string `json:"apartment,omitempty"`
+}
+
+// Update Client function
+func (app *App) updateClient(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Get client ID from URL
+	vars := mux.Vars(r)
+	clientIDStr := vars["client_id"]
+	clientID, err := strconv.Atoi(clientIDStr)
+	if err != nil || clientID <= 0 {
+		sendErrorResponse(w, "Invalid client_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	var req UpdateClientRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Check if user has permission to update this client
+	var exists bool
+	permissionQuery := `SELECT EXISTS(SELECT 1 FROM user_clients WHERE user_id = $1 AND client_id = $2)`
+	err = app.DB.QueryRow(permissionQuery, claims.UserID, clientID).Scan(&exists)
+	if err != nil || !exists {
+		sendErrorResponse(w, "Client not found or access denied", http.StatusForbidden)
+		return
+	}
+
+	// Validate update request
+	if err := validateUpdateClientRequest(&req); err != nil {
+		sendErrorResponse(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Start transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Build dynamic update query
+	updateFields := make([]string, 0)
+	args := make([]interface{}, 0)
+	argIndex := 1
+
+	if req.Name != "" {
+		updateFields = append(updateFields, "name = $"+strconv.Itoa(argIndex))
+		args = append(args, req.Name)
+		argIndex++
+	}
+	if req.CIF != "" {
+		// Check if CIF already exists for another client
+		var existingClientID int
+		cifQuery := `SELECT id FROM clients WHERE UPPER(cif) = UPPER($1) AND id != $2`
+		err = tx.QueryRow(cifQuery, req.CIF, clientID).Scan(&existingClientID)
+		if err == nil {
+			sendErrorResponse(w, "CIF already exists for another client", http.StatusConflict)
+			return
+		}
+		updateFields = append(updateFields, "cif = $"+strconv.Itoa(argIndex))
+		args = append(args, req.CIF)
+		argIndex++
+	}
+	if req.DOB != "" {
+		updateFields = append(updateFields, "dob = $"+strconv.Itoa(argIndex))
+		args = append(args, req.DOB)
+		argIndex++
+	}
+	if req.TradeRegisterNo != "" {
+		updateFields = append(updateFields, "trade_register_no = $"+strconv.Itoa(argIndex))
+		args = append(args, req.TradeRegisterNo)
+		argIndex++
+	}
+	if req.CountryID > 0 {
+		// Verify country exists
+		var countryExists bool
+		err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM countries WHERE id = $1)", req.CountryID).Scan(&countryExists)
+		if err != nil || !countryExists {
+			sendErrorResponse(w, "Invalid country_id", http.StatusBadRequest)
+			return
+		}
+		updateFields = append(updateFields, "country_id = $"+strconv.Itoa(argIndex))
+		args = append(args, req.CountryID)
+		argIndex++
+	}
+	if req.StateID > 0 {
+		// Verify state exists
+		var stateExists bool
+		err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM states WHERE id = $1)", req.StateID).Scan(&stateExists)
+		if err != nil || !stateExists {
+			sendErrorResponse(w, "Invalid state_id", http.StatusBadRequest)
+			return
+		}
+		updateFields = append(updateFields, "state_id = $"+strconv.Itoa(argIndex))
+		args = append(args, req.StateID)
+		argIndex++
+	}
+	if req.City != "" {
+		updateFields = append(updateFields, "city = $"+strconv.Itoa(argIndex))
+		args = append(args, req.City)
+		argIndex++
+	}
+	if req.StreetName != "" {
+		updateFields = append(updateFields, "street_name = $"+strconv.Itoa(argIndex))
+		args = append(args, req.StreetName)
+		argIndex++
+	}
+	if req.StreetNo != "" {
+		updateFields = append(updateFields, "street_no = $"+strconv.Itoa(argIndex))
+		args = append(args, req.StreetNo)
+		argIndex++
+	}
+	if req.Building != "" {
+		updateFields = append(updateFields, "building = $"+strconv.Itoa(argIndex))
+		args = append(args, nullIfEmpty(req.Building))
+		argIndex++
+	}
+	if req.Floor != "" {
+		updateFields = append(updateFields, "floor = $"+strconv.Itoa(argIndex))
+		args = append(args, nullIfEmpty(req.Floor))
+		argIndex++
+	}
+	if req.Apartment != "" {
+		updateFields = append(updateFields, "apartment = $"+strconv.Itoa(argIndex))
+		args = append(args, nullIfEmpty(req.Apartment))
+		argIndex++
+	}
+
+	// Always update updated_by
+	updateFields = append(updateFields, "updated_by = $"+strconv.Itoa(argIndex))
+	args = append(args, claims.UserID)
+	argIndex++
+
+	// Add client_id as the last parameter for WHERE clause
+	args = append(args, clientID)
+
+	if len(updateFields) > 1 { // More than just updated_by
+		clientUpdateQuery := `UPDATE clients SET ` +
+			updateFields[0]
+		for i := 1; i < len(updateFields); i++ {
+			clientUpdateQuery += ", " + updateFields[i]
+		}
+		clientUpdateQuery += " WHERE id = $" + strconv.Itoa(argIndex)
+
+		_, err = tx.Exec(clientUpdateQuery, args...)
+		if err != nil {
+			sendErrorResponse(w, "Failed to update client: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Commit transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Get updated client details
+	var client Client
+	clientQuery := `SELECT c.id, c.name, c.cif, 
+                          TO_CHAR(c.dob, 'YYYY-MM-DD') as dob,
+                          c.trade_register_no, c.country_id, c.state_id, 
+                          c.city, c.street_name, c.street_no, 
+                          COALESCE(c.building, '') as building, 
+                          COALESCE(c.floor, '') as floor, 
+                          COALESCE(c.apartment, '') as apartment,
+                          TO_CHAR(c.created_on, 'YYYY-MM-DD') as created_on,
+                          TO_CHAR(c.updated_on, 'YYYY-MM-DD') as updated_on,
+                          c.created_by, c.updated_by
+                   FROM clients c
+                   WHERE c.id = $1`
+
+	err = app.DB.QueryRow(clientQuery, clientID).Scan(
+		&client.ID, &client.Name, &client.CIF, &client.DOB,
+		&client.TradeRegisterNo, &client.CountryID, &client.StateID,
+		&client.City, &client.StreetName, &client.StreetNo, &client.Building,
+		&client.Floor, &client.Apartment, &client.CreatedOn, &client.UpdatedOn,
+		&client.CreatedBy, &client.UpdatedBy)
+
+	if err != nil {
+		sendSuccessResponse(w, "Client updated successfully", map[string]interface{}{
+			"status":    "OK",
+			"client_id": clientID,
+		})
+		return
+	}
+
+	sendSuccessResponse(w, "Client updated successfully", client)
+}
+
+// Delete Client function
+func (app *App) deleteClient(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Get client ID from URL
+	vars := mux.Vars(r)
+	clientIDStr := vars["client_id"]
+	clientID, err := strconv.Atoi(clientIDStr)
+	if err != nil || clientID <= 0 {
+		sendErrorResponse(w, "Invalid client_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Check if user has permission to delete this client
+	var clientName string
+	var exists bool
+	permissionQuery := `SELECT c.name, EXISTS(SELECT 1 FROM user_clients uc WHERE uc.user_id = $1 AND uc.client_id = $2)
+	                   FROM clients c 
+	                   WHERE c.id = $2`
+	err = app.DB.QueryRow(permissionQuery, claims.UserID, clientID).Scan(&clientName, &exists)
+	if err != nil || !exists {
+		sendErrorResponse(w, "Client not found or access denied", http.StatusForbidden)
+		return
+	}
+
+	// Check if client has active memberships
+	var activeMemberships int
+	membershipQuery := `SELECT COUNT(*) FROM client_memberships 
+	                   WHERE client_id = $1 AND status = 'active' 
+	                   AND CURRENT_DATE BETWEEN starting_from AND ending_on`
+	err = app.DB.QueryRow(membershipQuery, clientID).Scan(&activeMemberships)
+	if err == nil && activeMemberships > 0 {
+		sendErrorResponse(w, "Cannot delete client with active memberships", http.StatusConflict)
+		return
+	}
+
+	// Check if client is currently checked in to any gym
+	var currentCheckins int
+	checkinQuery := `SELECT COUNT(DISTINCT gym_id) FROM client_passes cp1
+	                 WHERE cp1.client_id = $1 
+	                 AND cp1.action = 'in'
+	                 AND DATE(cp1.created_on) = CURRENT_DATE
+	                 AND NOT EXISTS (
+	                     SELECT 1 FROM client_passes cp2 
+	                     WHERE cp2.client_id = cp1.client_id 
+	                     AND cp2.gym_id = cp1.gym_id
+	                     AND cp2.action = 'out'
+	                     AND DATE(cp2.created_on) = CURRENT_DATE
+	                     AND cp2.created_on > cp1.created_on
+	                 )`
+	err = app.DB.QueryRow(checkinQuery, clientID).Scan(&currentCheckins)
+	if err == nil && currentCheckins > 0 {
+		sendErrorResponse(w, "Cannot delete client who is currently checked in to gym(s)", http.StatusConflict)
+		return
+	}
+
+	// Start transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Delete related records (CASCADE should handle most, but let's be explicit)
+
+	// Delete client passes
+	_, err = tx.Exec("DELETE FROM client_passes WHERE client_id = $1", clientID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to delete client passes: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Delete client memberships
+	_, err = tx.Exec("DELETE FROM client_memberships WHERE client_id = $1", clientID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to delete client memberships: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Delete user-client relationships
+	_, err = tx.Exec("DELETE FROM user_clients WHERE client_id = $1", clientID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to delete user-client relationships: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Finally, delete the client itself
+	result, err := tx.Exec("DELETE FROM clients WHERE id = $1", clientID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to delete client: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Check if client was actually deleted
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		sendErrorResponse(w, "Client not found", http.StatusNotFound)
+		return
+	}
+
+	// Commit transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	sendSuccessResponse(w, "Client deleted successfully", map[string]interface{}{
+		"status":      "OK",
+		"client_id":   clientID,
+		"client_name": clientName,
+		"message":     "Client and all related data have been permanently deleted",
+	})
+}
+
+// Remove User from Client
+func (app *App) removeUserFromClient(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Get parameters from URL
+	vars := mux.Vars(r)
+	clientIDStr := vars["client_id"]
+	userIDStr := vars["user_id"]
+
+	clientID, err := strconv.Atoi(clientIDStr)
+	if err != nil || clientID <= 0 {
+		sendErrorResponse(w, "Invalid client_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	userID, err := strconv.Atoi(userIDStr)
+	if err != nil || userID <= 0 {
+		sendErrorResponse(w, "Invalid user_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Check if requesting user has permission (must be associated with the client)
+	var requestingUserExists bool
+	permissionQuery := `SELECT EXISTS(SELECT 1 FROM user_clients WHERE user_id = $1 AND client_id = $2)`
+	err = app.DB.QueryRow(permissionQuery, claims.UserID, clientID).Scan(&requestingUserExists)
+	if err != nil || !requestingUserExists {
+		sendErrorResponse(w, "Client not found or access denied", http.StatusForbidden)
+		return
+	}
+
+	// Check if target user exists in client
+	var targetUserName string
+	var targetUserExists bool
+	targetQuery := `SELECT u.username, EXISTS(SELECT 1 FROM user_clients uc WHERE uc.user_id = $1 AND uc.client_id = $2)
+	               FROM users u 
+	               WHERE u.id = $1`
+	err = app.DB.QueryRow(targetQuery, userID, clientID).Scan(&targetUserName, &targetUserExists)
+	if err != nil || !targetUserExists {
+		sendErrorResponse(w, "User not found in this client", http.StatusNotFound)
+		return
+	}
+
+	// Check if this would leave the client with no users
+	var userCount int
+	userCountQuery := `SELECT COUNT(*) FROM user_clients WHERE client_id = $1`
+	err = app.DB.QueryRow(userCountQuery, clientID).Scan(&userCount)
+	if err == nil && userCount <= 1 {
+		sendErrorResponse(w, "Cannot remove the last user from the client", http.StatusConflict)
+		return
+	}
+
+	// Remove user from client
+	result, err := app.DB.Exec("DELETE FROM user_clients WHERE user_id = $1 AND client_id = $2", userID, clientID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to remove user from client: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		sendErrorResponse(w, "User-client relationship not found", http.StatusNotFound)
+		return
+	}
+
+	sendSuccessResponse(w, "User removed from client successfully", map[string]interface{}{
+		"status":    "OK",
+		"client_id": clientID,
+		"user_id":   userID,
+		"username":  targetUserName,
+	})
+}
+
+// Remove Client Membership
+func (app *App) removeClientMembership(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Get parameters from URL
+	vars := mux.Vars(r)
+	clientIDStr := vars["client_id"]
+	membershipIDStr := vars["membership_id"]
+
+	clientID, err := strconv.Atoi(clientIDStr)
+	if err != nil || clientID <= 0 {
+		sendErrorResponse(w, "Invalid client_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	membershipID, err := strconv.Atoi(membershipIDStr)
+	if err != nil || membershipID <= 0 {
+		sendErrorResponse(w, "Invalid membership_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Check if user has permission for this client
+	var userExists bool
+	permissionQuery := `SELECT EXISTS(SELECT 1 FROM user_clients WHERE user_id = $1 AND client_id = $2)`
+	err = app.DB.QueryRow(permissionQuery, claims.UserID, clientID).Scan(&userExists)
+	if err != nil || !userExists {
+		sendErrorResponse(w, "Client not found or access denied", http.StatusForbidden)
+		return
+	}
+
+	// Check if membership is currently active
+	var isActive bool
+	var startDate, endDate string
+	activeQuery := `SELECT 
+	                   CASE WHEN status = 'active' AND CURRENT_DATE BETWEEN starting_from AND ending_on THEN true ELSE false END,
+	                   TO_CHAR(starting_from, 'YYYY-MM-DD'),
+	                   TO_CHAR(ending_on, 'YYYY-MM-DD')
+	               FROM client_memberships 
+	               WHERE client_id = $1 AND membership_id = $2
+	               ORDER BY id DESC LIMIT 1`
+	err = app.DB.QueryRow(activeQuery, clientID, membershipID).Scan(&isActive, &startDate, &endDate)
+	if err != nil {
+		sendErrorResponse(w, "Client membership not found", http.StatusNotFound)
+		return
+	}
+
+	if isActive {
+		sendErrorResponse(w, "Cannot remove active membership. Please deactivate first or wait until expiry.", http.StatusConflict)
+		return
+	}
+
+	// Remove client membership
+	result, err := app.DB.Exec("DELETE FROM client_memberships WHERE client_id = $1 AND membership_id = $2",
+		clientID, membershipID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to remove client membership: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		sendErrorResponse(w, "Client membership not found", http.StatusNotFound)
+		return
+	}
+
+	sendSuccessResponse(w, "Client membership removed successfully", map[string]interface{}{
+		"status":        "OK",
+		"client_id":     clientID,
+		"membership_id": membershipID,
+		"start_date":    startDate,
+		"end_date":      endDate,
+	})
+}
+
+// Deactivate Client Membership (alternative to removal)
+func (app *App) deactivateClientMembership(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Get parameters from URL
+	vars := mux.Vars(r)
+	clientIDStr := vars["client_id"]
+	membershipIDStr := vars["membership_id"]
+
+	clientID, err := strconv.Atoi(clientIDStr)
+	if err != nil || clientID <= 0 {
+		sendErrorResponse(w, "Invalid client_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	membershipID, err := strconv.Atoi(membershipIDStr)
+	if err != nil || membershipID <= 0 {
+		sendErrorResponse(w, "Invalid membership_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Check if user has permission for this client
+	var userExists bool
+	permissionQuery := `SELECT EXISTS(SELECT 1 FROM user_clients WHERE user_id = $1 AND client_id = $2)`
+	err = app.DB.QueryRow(permissionQuery, claims.UserID, clientID).Scan(&userExists)
+	if err != nil || !userExists {
+		sendErrorResponse(w, "Client not found or access denied", http.StatusForbidden)
+		return
+	}
+
+	// Deactivate the membership
+	result, err := app.DB.Exec(`UPDATE client_memberships 
+	                           SET status = 'suspended', 
+	                               updated_by = $3, 
+	                               updated_on = CURRENT_TIMESTAMP
+	                           WHERE client_id = $1 AND membership_id = $2 AND status = 'active'`,
+		clientID, membershipID, claims.UserID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to deactivate client membership: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		sendErrorResponse(w, "Active client membership not found", http.StatusNotFound)
+		return
+	}
+
+	sendSuccessResponse(w, "Client membership deactivated successfully", map[string]interface{}{
+		"status":        "OK",
+		"client_id":     clientID,
+		"membership_id": membershipID,
+		"new_status":    "suspended",
+	})
+}
+
+// Validation function for update requests
+func validateUpdateClientRequest(req *UpdateClientRequest) error {
+	// Length validations for provided fields
+	if req.Name != "" && len(req.Name) > 128 {
+		return fmt.Errorf("name cannot exceed 128 characters")
+	}
+	if req.CIF != "" && len(req.CIF) > 13 {
+		return fmt.Errorf("CIF cannot exceed 13 characters")
+	}
+	if req.TradeRegisterNo != "" && len(req.TradeRegisterNo) > 16 {
+		return fmt.Errorf("trade register number cannot exceed 16 characters")
+	}
+	if req.City != "" && len(req.City) > 64 {
+		return fmt.Errorf("city cannot exceed 64 characters")
+	}
+	if req.StreetName != "" && len(req.StreetName) > 64 {
+		return fmt.Errorf("street name cannot exceed 64 characters")
+	}
+	if req.StreetNo != "" && len(req.StreetNo) > 16 {
+		return fmt.Errorf("street number cannot exceed 16 characters")
+	}
+	if req.Building != "" && len(req.Building) > 16 {
+		return fmt.Errorf("building cannot exceed 16 characters")
+	}
+	if req.Floor != "" && len(req.Floor) > 8 {
+		return fmt.Errorf("floor cannot exceed 8 characters")
+	}
+	if req.Apartment != "" && len(req.Apartment) > 8 {
+		return fmt.Errorf("apartment cannot exceed 8 characters")
+	}
+
+	// Date format validation if provided
+	if req.DOB != "" {
+		if _, err := time.Parse("2006-01-02", req.DOB); err != nil {
+			return fmt.Errorf("date of birth must be in YYYY-MM-DD format")
+		}
+	}
+
+	// Required field validation (if provided, cannot be empty)
+	if req.Name == "" && req.Name != "" {
+		return fmt.Errorf("name cannot be empty")
+	}
+	if strings.TrimSpace(req.CIF) == "" && req.CIF != "" {
+		return fmt.Errorf("CIF cannot be empty")
+	}
+
+	return nil
+}
+
+// Get Client by ID (for viewing client details)
+func (app *App) getClientByID(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Get client ID from URL
+	vars := mux.Vars(r)
+	clientIDStr := vars["client_id"]
+	clientID, err := strconv.Atoi(clientIDStr)
+	if err != nil || clientID <= 0 {
+		sendErrorResponse(w, "Invalid client_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Get client details with country and state names
+	var client Client
+	clientQuery := `SELECT c.id, c.name, c.cif, 
+                          TO_CHAR(c.dob, 'YYYY-MM-DD') as dob,
+                          c.trade_register_no, c.country_id, c.state_id, 
+                          c.city, c.street_name, c.street_no, 
+                          COALESCE(c.building, '') as building, 
+                          COALESCE(c.floor, '') as floor, 
+                          COALESCE(c.apartment, '') as apartment,
+                          TO_CHAR(c.created_on, 'YYYY-MM-DD') as created_on,
+                          TO_CHAR(c.updated_on, 'YYYY-MM-DD') as updated_on,
+                          c.created_by, c.updated_by,
+                          COALESCE(co.name, '') as country_name,
+                          COALESCE(s.name, '') as state_name
+                   FROM clients c
+                   INNER JOIN user_clients uc ON uc.client_id = c.id
+                   LEFT JOIN countries co ON c.country_id = co.id
+                   LEFT JOIN states s ON c.state_id = s.id
+                   WHERE c.id = $1 AND uc.user_id = $2`
+
+	err = app.DB.QueryRow(clientQuery, clientID, claims.UserID).Scan(
+		&client.ID, &client.Name, &client.CIF, &client.DOB,
+		&client.TradeRegisterNo, &client.CountryID, &client.StateID,
+		&client.City, &client.StreetName, &client.StreetNo, &client.Building,
+		&client.Floor, &client.Apartment, &client.CreatedOn, &client.UpdatedOn,
+		&client.CreatedBy, &client.UpdatedBy, &client.CountryName, &client.StateName)
+
+	if err != nil {
+		sendErrorResponse(w, "Client not found or access denied", http.StatusNotFound)
+		return
+	}
+
+	sendSuccessResponse(w, "Client retrieved successfully", client)
 }

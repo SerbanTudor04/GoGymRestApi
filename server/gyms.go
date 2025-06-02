@@ -756,3 +756,610 @@ func (app *App) getGymStats(w http.ResponseWriter, r *http.Request) {
 
 	sendSuccessResponse(w, "Gym stats retrieved successfully", gymStats)
 }
+
+// Update Gym Request struct
+type UpdateGymRequest struct {
+	Name            string `json:"name,omitempty"`
+	Address         string `json:"address,omitempty"`
+	Phone           string `json:"phone,omitempty"`
+	Email           string `json:"email,omitempty"`
+	MaxPeople       int    `json:"max_people,omitempty"`
+	MaxReservations int    `json:"max_reservations,omitempty"`
+}
+
+// Update Gym function
+func (app *App) updateGym(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Get gym ID from URL
+	vars := mux.Vars(r)
+	gymIDStr := vars["gym_id"]
+	gymID, err := strconv.Atoi(gymIDStr)
+	if err != nil || gymID <= 0 {
+		sendErrorResponse(w, "Invalid gym_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	var req UpdateGymRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Check if user has permission to update this gym
+	var userRole string
+	roleQuery := `SELECT role FROM user_gyms WHERE user_id = $1 AND gym_id = $2`
+	err = app.DB.QueryRow(roleQuery, claims.UserID, gymID).Scan(&userRole)
+	if err != nil {
+		sendErrorResponse(w, "Gym not found or access denied", http.StatusForbidden)
+		return
+	}
+
+	if userRole != "admin" {
+		sendErrorResponse(w, "Insufficient permissions. Admin role required", http.StatusForbidden)
+		return
+	}
+
+	// Start transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Update gym basic information
+	updateFields := make([]string, 0)
+	args := make([]interface{}, 0)
+	argIndex := 1
+
+	if req.Name != "" {
+		updateFields = append(updateFields, "name = $"+strconv.Itoa(argIndex))
+		args = append(args, req.Name)
+		argIndex++
+	}
+	if req.Address != "" {
+		updateFields = append(updateFields, "address = $"+strconv.Itoa(argIndex))
+		args = append(args, req.Address)
+		argIndex++
+	}
+	if req.Phone != "" {
+		updateFields = append(updateFields, "phone = $"+strconv.Itoa(argIndex))
+		args = append(args, req.Phone)
+		argIndex++
+	}
+	if req.Email != "" {
+		updateFields = append(updateFields, "email = $"+strconv.Itoa(argIndex))
+		args = append(args, req.Email)
+		argIndex++
+	}
+
+	// Always update updated_by and updated_on
+	updateFields = append(updateFields, "updated_by = $"+strconv.Itoa(argIndex))
+	args = append(args, claims.UserID)
+	argIndex++
+
+	// Add gym_id as the last parameter for WHERE clause
+	args = append(args, gymID)
+
+	if len(updateFields) > 1 { // More than just updated_by
+		gymUpdateQuery := `UPDATE gyms SET ` +
+			updateFields[0]
+		for i := 1; i < len(updateFields); i++ {
+			gymUpdateQuery += ", " + updateFields[i]
+		}
+		gymUpdateQuery += " WHERE id = $" + strconv.Itoa(argIndex)
+
+		_, err = tx.Exec(gymUpdateQuery, args...)
+		if err != nil {
+			sendErrorResponse(w, "Failed to update gym: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Update gym stats if provided
+	if req.MaxPeople > 0 || req.MaxReservations > 0 {
+		statsUpdateFields := make([]string, 0)
+		statsArgs := make([]interface{}, 0)
+		statsArgIndex := 1
+
+		if req.MaxPeople > 0 {
+			statsUpdateFields = append(statsUpdateFields, "max_people = $"+strconv.Itoa(statsArgIndex))
+			statsArgs = append(statsArgs, req.MaxPeople)
+			statsArgIndex++
+		}
+		if req.MaxReservations > 0 {
+			statsUpdateFields = append(statsUpdateFields, "max_resevations = $"+strconv.Itoa(statsArgIndex))
+			statsArgs = append(statsArgs, req.MaxReservations)
+			statsArgIndex++
+		}
+
+		// Add gym_id for WHERE clause
+		statsArgs = append(statsArgs, gymID)
+
+		statsUpdateQuery := `UPDATE gym_stats SET ` +
+			statsUpdateFields[0]
+		for i := 1; i < len(statsUpdateFields); i++ {
+			statsUpdateQuery += ", " + statsUpdateFields[i]
+		}
+		statsUpdateQuery += " WHERE gym_id = $" + strconv.Itoa(statsArgIndex)
+
+		_, err = tx.Exec(statsUpdateQuery, statsArgs...)
+		if err != nil {
+			sendErrorResponse(w, "Failed to update gym stats: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Commit transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	// Get updated gym details
+	var gym Gym
+	gymQuery := `SELECT g.id, g.name, g.members, gs.max_people, gs.max_resevations 
+                 FROM gyms g 
+                 JOIN gym_stats gs ON g.id = gs.gym_id 
+                 WHERE g.id = $1`
+
+	err = app.DB.QueryRow(gymQuery, gymID).Scan(
+		&gym.ID, &gym.Name, &gym.Members, &gym.MaxPeople, &gym.MaxReservations)
+
+	if err != nil {
+		sendSuccessResponse(w, "Gym updated successfully", map[string]interface{}{
+			"status": "OK",
+			"gym_id": gymID,
+		})
+		return
+	}
+
+	sendSuccessResponse(w, "Gym updated successfully", gym)
+}
+
+// Delete Gym function
+func (app *App) deleteGym(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Get gym ID from URL
+	vars := mux.Vars(r)
+	gymIDStr := vars["gym_id"]
+	gymID, err := strconv.Atoi(gymIDStr)
+	if err != nil || gymID <= 0 {
+		sendErrorResponse(w, "Invalid gym_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Check if user has permission to delete this gym
+	var userRole string
+	var gymName string
+	roleQuery := `SELECT ug.role, g.name 
+	              FROM user_gyms ug 
+	              JOIN gyms g ON ug.gym_id = g.id 
+	              WHERE ug.user_id = $1 AND ug.gym_id = $2`
+	err = app.DB.QueryRow(roleQuery, claims.UserID, gymID).Scan(&userRole, &gymName)
+	if err != nil {
+		sendErrorResponse(w, "Gym not found or access denied", http.StatusForbidden)
+		return
+	}
+
+	if userRole != "admin" {
+		sendErrorResponse(w, "Insufficient permissions. Admin role required", http.StatusForbidden)
+		return
+	}
+
+	// Check if gym has active client memberships
+	var activeMemberships int
+	membershipQuery := `SELECT COUNT(*) FROM client_memberships cm
+	                   JOIN membership_gyms mg ON cm.membership_id = mg.membership_id
+	                   WHERE mg.gym_id = $1 AND cm.status = 'active' 
+	                   AND CURRENT_DATE BETWEEN cm.starting_from AND cm.ending_on`
+	err = app.DB.QueryRow(membershipQuery, gymID).Scan(&activeMemberships)
+	if err == nil && activeMemberships > 0 {
+		sendErrorResponse(w, "Cannot delete gym with active client memberships", http.StatusConflict)
+		return
+	}
+
+	// Check if gym has people currently checked in
+	var currentPeople int
+	occupancyQuery := `SELECT current_people FROM gym_stats WHERE gym_id = $1`
+	err = app.DB.QueryRow(occupancyQuery, gymID).Scan(&currentPeople)
+	if err == nil && currentPeople > 0 {
+		sendErrorResponse(w, "Cannot delete gym with people currently checked in", http.StatusConflict)
+		return
+	}
+
+	// Start transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Delete related records (CASCADE should handle most, but let's be explicit)
+
+	// Delete gym stats
+	_, err = tx.Exec("DELETE FROM gym_stats WHERE gym_id = $1", gymID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to delete gym stats: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Delete user-gym relationships
+	_, err = tx.Exec("DELETE FROM user_gyms WHERE gym_id = $1", gymID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to delete user-gym relationships: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Delete membership-gym relationships
+	_, err = tx.Exec("DELETE FROM membership_gyms WHERE gym_id = $1", gymID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to delete membership-gym relationships: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Delete gym-machine relationships
+	_, err = tx.Exec("DELETE FROM gym_machines WHERE gym_id = $1", gymID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to delete gym-machine relationships: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Delete client passes
+	_, err = tx.Exec("DELETE FROM client_passes WHERE gym_id = $1", gymID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to delete client passes: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Finally, delete the gym itself
+	result, err := tx.Exec("DELETE FROM gyms WHERE id = $1", gymID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to delete gym: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Check if gym was actually deleted
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		sendErrorResponse(w, "Gym not found", http.StatusNotFound)
+		return
+	}
+
+	// Commit transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	sendSuccessResponse(w, "Gym deleted successfully", map[string]interface{}{
+		"status":   "OK",
+		"gym_id":   gymID,
+		"gym_name": gymName,
+		"message":  "Gym and all related data have been permanently deleted",
+	})
+}
+
+// Remove User from Gym
+func (app *App) removeUserFromGym(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Get parameters from URL
+	vars := mux.Vars(r)
+	gymIDStr := vars["gym_id"]
+	userIDStr := vars["user_id"]
+
+	gymID, err := strconv.Atoi(gymIDStr)
+	if err != nil || gymID <= 0 {
+		sendErrorResponse(w, "Invalid gym_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	userID, err := strconv.Atoi(userIDStr)
+	if err != nil || userID <= 0 {
+		sendErrorResponse(w, "Invalid user_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Check if requesting user has permission (admin or removing themselves)
+	var requestingUserRole string
+	roleQuery := `SELECT role FROM user_gyms WHERE user_id = $1 AND gym_id = $2`
+	err = app.DB.QueryRow(roleQuery, claims.UserID, gymID).Scan(&requestingUserRole)
+	if err != nil {
+		sendErrorResponse(w, "Gym not found or access denied", http.StatusForbidden)
+		return
+	}
+
+	// Allow if user is admin or removing themselves
+	if requestingUserRole != "admin" && claims.UserID != userID {
+		sendErrorResponse(w, "Insufficient permissions", http.StatusForbidden)
+		return
+	}
+
+	// Check if target user exists in gym
+	var targetUserRole string
+	var targetUserName string
+	targetQuery := `SELECT ug.role, u.username 
+	               FROM user_gyms ug 
+	               JOIN users u ON ug.user_id = u.id 
+	               WHERE ug.user_id = $1 AND ug.gym_id = $2`
+	err = app.DB.QueryRow(targetQuery, userID, gymID).Scan(&targetUserRole, &targetUserName)
+	if err != nil {
+		sendErrorResponse(w, "User not found in this gym", http.StatusNotFound)
+		return
+	}
+
+	// Prevent removing the last admin
+	if targetUserRole == "admin" {
+		var adminCount int
+		adminCountQuery := `SELECT COUNT(*) FROM user_gyms WHERE gym_id = $1 AND role = 'admin'`
+		err = app.DB.QueryRow(adminCountQuery, gymID).Scan(&adminCount)
+		if err == nil && adminCount <= 1 {
+			sendErrorResponse(w, "Cannot remove the last admin from the gym", http.StatusConflict)
+			return
+		}
+	}
+
+	// Start transaction
+	tx, err := app.DB.Begin()
+	if err != nil {
+		sendErrorResponse(w, "Failed to start transaction", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Remove user from gym
+	result, err := tx.Exec("DELETE FROM user_gyms WHERE user_id = $1 AND gym_id = $2", userID, gymID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to remove user from gym: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		sendErrorResponse(w, "User-gym relationship not found", http.StatusNotFound)
+		return
+	}
+
+	// Update gym members count
+	_, err = tx.Exec("UPDATE gyms SET members = members - 1 WHERE id = $1 AND members > 0", gymID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to update gym members count: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Commit transaction
+	err = tx.Commit()
+	if err != nil {
+		sendErrorResponse(w, "Failed to commit transaction", http.StatusInternalServerError)
+		return
+	}
+
+	sendSuccessResponse(w, "User removed from gym successfully", map[string]interface{}{
+		"status":    "OK",
+		"gym_id":    gymID,
+		"user_id":   userID,
+		"username":  targetUserName,
+		"user_role": targetUserRole,
+	})
+}
+
+// Remove Membership from Gym
+func (app *App) removeMembershipFromGym(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Get parameters from URL
+	vars := mux.Vars(r)
+	gymIDStr := vars["gym_id"]
+	membershipIDStr := vars["membership_id"]
+
+	gymID, err := strconv.Atoi(gymIDStr)
+	if err != nil || gymID <= 0 {
+		sendErrorResponse(w, "Invalid gym_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	membershipID, err := strconv.Atoi(membershipIDStr)
+	if err != nil || membershipID <= 0 {
+		sendErrorResponse(w, "Invalid membership_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Check if user has admin permission for this gym
+	var userRole string
+	roleQuery := `SELECT role FROM user_gyms WHERE user_id = $1 AND gym_id = $2`
+	err = app.DB.QueryRow(roleQuery, claims.UserID, gymID).Scan(&userRole)
+	if err != nil {
+		sendErrorResponse(w, "Gym not found or access denied", http.StatusForbidden)
+		return
+	}
+
+	if userRole != "admin" {
+		sendErrorResponse(w, "Insufficient permissions. Admin role required", http.StatusForbidden)
+		return
+	}
+
+	// Check if there are active client memberships using this membership type
+	var activeClientMemberships int
+	clientMembershipQuery := `SELECT COUNT(*) FROM client_memberships 
+	                         WHERE membership_id = $1 AND status = 'active' 
+	                         AND CURRENT_DATE BETWEEN starting_from AND ending_on`
+	err = app.DB.QueryRow(clientMembershipQuery, membershipID).Scan(&activeClientMemberships)
+	if err == nil && activeClientMemberships > 0 {
+		sendErrorResponse(w, "Cannot remove membership type with active client memberships", http.StatusConflict)
+		return
+	}
+
+	// Remove membership from gym
+	result, err := app.DB.Exec("DELETE FROM membership_gyms WHERE membership_id = $1 AND gym_id = $2",
+		membershipID, gymID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to remove membership from gym: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		sendErrorResponse(w, "Membership-gym relationship not found", http.StatusNotFound)
+		return
+	}
+
+	sendSuccessResponse(w, "Membership removed from gym successfully", map[string]interface{}{
+		"status":        "OK",
+		"gym_id":        gymID,
+		"membership_id": membershipID,
+	})
+}
+
+// Remove Machine from Gym
+func (app *App) removeMachineFromGym(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		sendErrorResponse(w, "Invalid authorization header", http.StatusUnauthorized)
+		return
+	}
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Get parameters from URL
+	vars := mux.Vars(r)
+	gymIDStr := vars["gym_id"]
+	machineIDStr := vars["machine_id"]
+
+	gymID, err := strconv.Atoi(gymIDStr)
+	if err != nil || gymID <= 0 {
+		sendErrorResponse(w, "Invalid gym_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	machineID, err := strconv.Atoi(machineIDStr)
+	if err != nil || machineID <= 0 {
+		sendErrorResponse(w, "Invalid machine_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Check if user has admin permission for this gym
+	var userRole string
+	roleQuery := `SELECT role FROM user_gyms WHERE user_id = $1 AND gym_id = $2`
+	err = app.DB.QueryRow(roleQuery, claims.UserID, gymID).Scan(&userRole)
+	if err != nil {
+		sendErrorResponse(w, "Gym not found or access denied", http.StatusForbidden)
+		return
+	}
+
+	if userRole != "admin" {
+		sendErrorResponse(w, "Insufficient permissions. Admin role required", http.StatusForbidden)
+		return
+	}
+
+	// Remove machine from gym
+	result, err := app.DB.Exec("DELETE FROM gym_machines WHERE machine_id = $1 AND gym_id = $2",
+		machineID, gymID)
+	if err != nil {
+		sendErrorResponse(w, "Failed to remove machine from gym: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		sendErrorResponse(w, "Machine-gym relationship not found", http.StatusNotFound)
+		return
+	}
+
+	sendSuccessResponse(w, "Machine removed from gym successfully", map[string]interface{}{
+		"status":     "OK",
+		"gym_id":     gymID,
+		"machine_id": machineID,
+	})
+}

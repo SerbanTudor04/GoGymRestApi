@@ -35,52 +35,67 @@ func (app *App) setupMembershipsRouter(r *mux.Router) {
 	m.HandleFunc("/", app.getMemberships).Methods("GET")
 }
 
+// Add these routes to your setupGymsRouter function in router.go
+
 func (app *App) setupGymsRouter(r *mux.Router) {
 	g := r.PathPrefix("/gyms").Subrouter()
 	g.Use(app.authenticateJWTMiddleware)
+
+	// Basic CRUD operations
 	g.HandleFunc("/create", app.createGym).Methods("POST")
 	g.HandleFunc("/", app.getGyms).Methods("GET")
+	g.HandleFunc("/{gym_id}", app.updateGym).Methods("PUT")
+	g.HandleFunc("/{gym_id}", app.deleteGym).Methods("DELETE")
+
+	// User management
 	g.HandleFunc("/add-user", app.addUserToGym).Methods("POST")
 	g.HandleFunc("/{gym_id}/users/{user_id}", app.addUserToGymByPath).Methods("POST")
-	// For JSON body version
+	g.HandleFunc("/{gym_id}/users/{user_id}", app.removeUserFromGym).Methods("DELETE")
+
+	// Membership management
 	g.HandleFunc("/membership/add", app.addMembershipToGym).Methods("POST")
-
-	// For path parameter version
 	g.HandleFunc("/{gym_id}/membership/{membership_id}", app.addMembershipToGymByPath).Methods("POST")
+	g.HandleFunc("/{gym_id}/membership/{membership_id}", app.removeMembershipFromGym).Methods("DELETE")
 
-	// For JSON body version
+	// Machine management
 	g.HandleFunc("/machine/add", app.addMachineToGym).Methods("POST")
-
-	// For path parameter version
 	g.HandleFunc("/{gym_id}/machine/{machine_id}", app.addMachineToGymByPath).Methods("POST")
-	// For gym stats retrieval
-	g.HandleFunc("/api/gym/{gym_id}/stats", app.getGymStats).Methods("GET")
+	g.HandleFunc("/{gym_id}/machine/{machine_id}", app.removeMachineFromGym).Methods("DELETE")
 
+	// Stats
+	g.HandleFunc("/{gym_id}/stats", app.getGymStats).Methods("GET")
 }
+
+// Add these routes to your setupClientsRouter function in router.go
 
 func (app *App) setupClientsRouter(r *mux.Router) {
 	c := r.PathPrefix("/clients").Subrouter()
 	c.Use(app.authenticateJWTMiddleware)
+
+	// Basic CRUD operations
 	c.HandleFunc("/", app.getClients).Methods("GET")
+	c.HandleFunc("/create", app.createClient).Methods("POST")
+	c.HandleFunc("/{client_id}", app.getClientByID).Methods("GET")
+	c.HandleFunc("/{client_id}", app.updateClient).Methods("PUT")
+	c.HandleFunc("/{client_id}", app.deleteClient).Methods("DELETE")
+
+	// User management
 	c.HandleFunc("/add-user", app.addUserToClient).Methods("POST")
 	c.HandleFunc("/{client_id}/users/{user_id}", app.addUserToClientByPath).Methods("POST")
-	c.HandleFunc("/create", app.createClient).Methods("POST")
-	// For JSON body version
+	c.HandleFunc("/{client_id}/users/{user_id}", app.removeUserFromClient).Methods("DELETE")
+
+	// Membership management
 	c.HandleFunc("/membership/add", app.addClientMembership).Methods("POST")
-
-	// For path parameter version
 	c.HandleFunc("/{client_id}/membership/{membership_id}/from/{valid_from}", app.addClientMembershipByPath).Methods("POST")
-	// For JSON body version
-	c.HandleFunc("/checkin", app.doClientCheckInGym).Methods("POST")
-	// For path parameter version
-	c.HandleFunc("/{client_id}/checkin/gym/{gym_id}", app.doClientCheckInGymByPath).Methods("POST")
-	// For JSON body version
-	c.HandleFunc("/checkout", app.doClientCheckOutGym).Methods("POST")
+	c.HandleFunc("/{client_id}/membership/{membership_id}", app.removeClientMembership).Methods("DELETE")
+	c.HandleFunc("/{client_id}/membership/{membership_id}/deactivate", app.deactivateClientMembership).Methods("PATCH")
 
-	// For path parameter version
+	// Check-in/Check-out
+	c.HandleFunc("/checkin", app.doClientCheckInGym).Methods("POST")
+	c.HandleFunc("/{client_id}/checkin/gym/{gym_id}", app.doClientCheckInGymByPath).Methods("POST")
+	c.HandleFunc("/checkout", app.doClientCheckOutGym).Methods("POST")
 	c.HandleFunc("/{client_id}/checkout/gym/{gym_id}", app.doClientCheckOutGymByPath).Methods("POST")
 
-	// For client status check
+	// Status check
 	c.HandleFunc("/{client_id}/gym/{gym_id}/status", app.getClientGymStatus).Methods("GET")
-
 }
