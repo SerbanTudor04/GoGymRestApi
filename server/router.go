@@ -14,12 +14,19 @@ func (app *App) setupApiRouter(r *mux.Router) {
 	api.HandleFunc("/health", app.healthCheck).Methods("GET")
 }
 
+// Update your setupUserRouter function in router.go
+
 func (app *App) setupUserRouter(r *mux.Router) {
 	user := r.PathPrefix("/users").Subrouter()
-	// Protected route - requires JWT authentication
-	user.HandleFunc("/me", app.authenticateJWT(app.getMe)).Methods("GET")
+
+	// Public routes (no authentication required)
 	user.HandleFunc("/register", app.registerUser).Methods("POST")
 	user.HandleFunc("/login", app.loginUser).Methods("POST")
+
+	// Protected routes (require JWT authentication)
+	user.HandleFunc("/me", app.authenticateJWT(app.getMe)).Methods("GET")
+	user.HandleFunc("/", app.authenticateJWT(app.getUsers)).Methods("GET")
+	user.HandleFunc("/search", app.authenticateJWT(app.getUsersWithSearch)).Methods("GET")
 }
 
 func (app *App) setupNomenclatorsRouter(r *mux.Router) {

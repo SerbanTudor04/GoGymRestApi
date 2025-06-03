@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 	"net/http"
@@ -262,4 +263,151 @@ func generateJWTToken(userID int, username string) (string, error) {
 	}
 
 	return tokenString, nil
+}
+
+// Add this to your users.go file
+
+// Simple User struct for listing users (without sensitive data)
+type UserSummary struct {
+	ID       int    `json:"id"`
+	FullName string `json:"full_name"`
+}
+
+// GetUsers retrieves all users with just ID and full name
+func (app *App) getUsers(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" || len(authHeader) < 8 {
+		sendErrorResponse(w, "Authorization header missing or invalid", http.StatusUnauthorized)
+		return
+	}
+
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Query to get all users with just ID and full name
+	userQuery := `SELECT id, full_name 
+	              FROM users 
+	              WHERE status = 'active'
+	              ORDER BY full_name ASC`
+
+	rows, err := app.DB.Query(userQuery)
+	if err != nil {
+		sendErrorResponse(w, "Failed to fetch users: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var users []UserSummary
+	for rows.Next() {
+		var user UserSummary
+		err := rows.Scan(&user.ID, &user.FullName)
+		if err != nil {
+			sendErrorResponse(w, "Failed to scan user: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		users = append(users, user)
+	}
+
+	// Check for any row iteration errors
+	if err = rows.Err(); err != nil {
+		sendErrorResponse(w, "Error during row iteration: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// If no users found, return empty array instead of null
+	if users == nil {
+		users = []UserSummary{}
+	}
+
+	sendSuccessResponse(w, "Users retrieved successfully", users)
+}
+
+// GetUsersWithSearch retrieves users with optional search functionality
+func (app *App) getUsersWithSearch(w http.ResponseWriter, r *http.Request) {
+	// Authenticate user
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" || len(authHeader) < 8 {
+		sendErrorResponse(w, "Authorization header missing or invalid", http.StatusUnauthorized)
+		return
+	}
+
+	tokenString := authHeader[7:] // Remove "Bearer "
+
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		return []byte(JWT_SECRET), nil
+	})
+
+	if err != nil {
+		sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Get search parameter from query string
+	searchTerm := r.URL.Query().Get("search")
+
+	var userQuery string
+	var args []interface{}
+
+	if searchTerm != "" {
+		// Search in full name (case insensitive)
+		userQuery = `SELECT id, full_name 
+		            FROM users 
+		            WHERE status = 'active' 
+		            AND UPPER(full_name) LIKE UPPER($1)
+		            ORDER BY full_name ASC`
+		args = append(args, "%"+searchTerm+"%")
+	} else {
+		// Get all active users
+		userQuery = `SELECT id, full_name 
+		            FROM users 
+		            WHERE status = 'active'
+		            ORDER BY full_name ASC`
+	}
+
+	rows, err := app.DB.Query(userQuery, args...)
+	if err != nil {
+		sendErrorResponse(w, "Failed to fetch users: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var users []UserSummary
+	for rows.Next() {
+		var user UserSummary
+		err := rows.Scan(&user.ID, &user.FullName)
+		if err != nil {
+			sendErrorResponse(w, "Failed to scan user: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		users = append(users, user)
+	}
+
+	// Check for any row iteration errors
+	if err = rows.Err(); err != nil {
+		sendErrorResponse(w, "Error during row iteration: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// If no users found, return empty array instead of null
+	if users == nil {
+		users = []UserSummary{}
+	}
+
+	message := "Users retrieved successfully"
+	if searchTerm != "" {
+		message = fmt.Sprintf("Users matching '%s' retrieved successfully", searchTerm)
+	}
+
+	sendSuccessResponse(w, message, users)
 }

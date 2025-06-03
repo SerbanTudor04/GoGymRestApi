@@ -62,7 +62,9 @@ func (app *App) getClients(w http.ResponseWriter, r *http.Request) {
                           c.floor, c.apartment,
                           TO_CHAR(c.created_on, 'YYYY-MM-DD') as created_on,
                           TO_CHAR(c.updated_on, 'YYYY-MM-DD') as updated_on,
-                          c.created_by, c.updated_by
+                          c.created_by, c.updated_by, 
+                          (select q.name from countries q where q.id=c.country_id) country_name,
+                          (select q.name from states q where q.id=c.state_id) state_name
                    FROM clients c
                    inner join user_clients uc on uc.client_id = c.id
                    where uc.user_id = $1
@@ -83,7 +85,7 @@ func (app *App) getClients(w http.ResponseWriter, r *http.Request) {
 			&client.TradeRegisterNo, &client.CountryID, &client.StateID,
 			&client.City, &client.StreetName, &client.StreetNo, &client.Building,
 			&client.Floor, &client.Apartment, &client.CreatedOn, &client.UpdatedOn,
-			&client.CreatedBy, &client.UpdatedBy)
+			&client.CreatedBy, &client.UpdatedBy, &client.CountryName, &client.StateName)
 
 		if err != nil {
 			sendErrorResponse(w, "Failed to scan client: "+err.Error(), http.StatusInternalServerError)
